@@ -5,6 +5,7 @@
 [![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](#环境要求)
 [![python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)](#环境要求)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![release](https://img.shields.io/github/v/release/pat-oss/dsh-pet-vision.svg)](https://github.com/pat-oss/dsh-pet-vision/releases/latest)
 
 一只住在你电脑里的桌宠：蓝头发、鲸鱼尾巴的女仆鱼。
 
@@ -32,6 +33,7 @@
 - [它能做什么](#它能做什么)
 - [它是怎么工作的](#它是怎么工作的)
 - [环境要求](#环境要求)
+- [下载即用（推荐）](#下载即用推荐)
 - [快速开始](#快速开始)
 - [模型下载](#模型下载)
 - [首次设置](#首次设置)
@@ -82,9 +84,27 @@
 - Windows 10 / 11（x64）
 - Python 3.11 及以上
 - 一个 DeepSeek 开放平台的 API Key（`sk-` 开头，[申请地址](https://platform.deepseek.com/)）
-- 磁盘：源码约 40 MB + 模型约 800 MB + 运行时数据几 MB
+- 磁盘：源码约 40 MB + 模型约 800 MB + 运行时数据几 MB（完整包解压后 1119 MB）
 - 内存：模型常驻，实际占用约 2 GB
 - 麦克风（用唤醒词功能时；不插麦克风也能打字对话）
+
+## 下载即用（推荐）
+
+不想折腾 Python 环境的话，直接下载打好包的完整版 —— **模型权重都在里面**，解压双击就能用：
+
+**⬇ [little-whale-pet-win64-v1.0.0.zip](https://github.com/pat-oss/dsh-pet-vision/releases/download/v1.0.0/little-whale-pet-win64-v1.0.0.zip)**
+
+压缩包 **554 MB**，解压后 **1119 MB**；内含 MOSS-TTS-Nano 642 MB + 音频编解码 87 MB + Vosk 唤醒模型 66 MB。
+去 [Releases 页面](https://github.com/pat-oss/dsh-pet-vision/releases/latest) 可以看更新记录和 SHA256。
+
+1. 下载并解压到任意目录 —— **要把整个 `小鲸鱼` 文件夹一起解出来**，不要只把 exe 拖走：
+   `_internal`、`models`、`pet` 必须和 `小鲸鱼.exe` 在同一层目录，否则起不来。
+2. 双击 `小鲸鱼.exe`。
+3. 首次启动会弹设置窗，填上 DeepSeek API Key（`sk-` 开头）→ 点保存。
+4. 系统询问麦克风 / 网络权限时选「允许」（麦克风用于喊名字，不给也能打字聊天）。
+
+> 打包版没有做代码签名，火绒 / 腾讯电脑管家 / Defender 可能拦一下，加白名单即可。
+> 不放心的话所有源码都在本仓库，按下面的步骤自己跑、自己打包完全等价。
 
 ## 快速开始
 
@@ -108,8 +128,10 @@ python main.py
 
 第一次启动会弹设置窗，填上 DeepSeek API Key 就能用了。之后每次启动都静默读配置，不再询问。
 
-> 想直接跑打包好的 exe？先按上面的步骤下模型，然后 `pip install pyinstaller` 并执行
-> `python scripts/build_exe.py`，产物在 `dist\小鲸鱼\小鲸鱼.exe`。
+> 只想跑打包好的 exe？
+> **想省事** → 直接用上面的 [下载即用](#下载即用推荐) 完整包，模型已经打进去了。
+> **想自己打包** → 先按上面步骤下模型，再 `pip install pyinstaller`，
+> 执行 `python scripts/build_exe.py`，产物在 `dist\小鲸鱼\小鲸鱼.exe`（约 1.1 GB）。
 
 ## 模型下载
 
@@ -278,8 +300,15 @@ python scripts/prepare_assets.py --src _assets_src/webm --out pet/assets/frames 
 之类的错误分类。托盘 →「重新设置…」换成有效 Key 即可。
 
 **Q：杀毒软件报毒 / 拦截？**
-PyInstaller 打的未签名 exe 常被误判。把 `dist\小鲸鱼\` 加进白名单；打包版还需要允许它访问网络
+PyInstaller 打的未签名 exe 常被误判。把整个 `小鲸鱼\` 目录加进白名单；打包版还需要允许它访问网络
 （DeepSeek API）和麦克风。
+
+**Q：下好的完整包解压后双击没反应？**
+① 必须**整个 `小鲸鱼` 文件夹一起解压**——`_internal`、`models`、`pet` 要和 `小鲸鱼.exe` 同层，
+单独把 exe 拖出来一定起不来；
+② 解压路径尽量短、别带特殊符号，`D:\小鲸鱼\` 这种最稳；
+③ 看同目录有没有生成 `run.log`：**没有日志说明进程根本没起来**，基本是被杀软拦了；
+有日志就按里面的报错走。
 
 **Q：内存占 2 GB 正常吗？**
 正常。三个 ONNX 模型常驻内存，其中主模型 641 MB。
