@@ -45,6 +45,13 @@ huggingface-cli download OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX --local-dir model
 huggingface-cli download OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX --local-dir models/moss-audio-tokenizer-nano-onnx
 ```
 
+> **国内拉 HuggingFace 很慢的话**，先设镜像端点再执行上面的命令（`huggingface_hub` 会自动读这个变量）：
+> ```bat
+> set HF_ENDPOINT=https://hf-mirror.com
+> python scripts/download_models.py
+> ```
+> Vosk 那个包在 alphacephei.com 上，一般不需要翻墙。
+
 ## 缺了会怎样
 
 | 缺哪个 | 后果 |
