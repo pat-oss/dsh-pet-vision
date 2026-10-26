@@ -1,0 +1,92 @@
+# 小鲸鱼桌宠配置（声明式；改行为不改代码）
+# 所有阈值如与实际感受不符，优先调这里，不要改代码。
+
+persona:
+  name: 小鲸鱼
+  style: "可爱、撒娇、偶尔吐槽；深海鱼设定，离不开水但住在电脑里"
+  user_address: 主人              # 她怎么称呼你（首次设置弹窗可改）
+  prompt_version: v2              # 改动人设必须升版本 → 前缀缓存显式失效（设计文档 §4.3）
+
+wake:                            # 唤醒词监听（像手机助手一样一直听）
+  enabled: true                   # false = 关闭，只靠点击/打字对话
+  phrase: 小鲸鱼                  # 唤醒词=你对她的称呼（首次设置弹窗可改）
+  model_dir: models/vosk-small-cn # Vosk 中文小模型（下载见 README）
+  energy_threshold: 0.006         # RMS 能量门：低于视为静音，不喂识别器（省 CPU）。
+                                  # 实测环境噪声 ~0.0015、正常说话 0.03+，0.006 兼顾轻声与远麦
+  hangover_blocks: 5              # 能量掉下后继续喂 5 块（~0.5s），防切掉词头
+  silence_ms: 3000                # 唤醒后静默多久算说完。用户要求：叫名字后 3s 内
+                                  # 没有后续问题就结束本轮语音识别并回复（应答语在
+                                  # 唤醒时已播）；她播应答的时间不计入这 3s
+  command_timeout_sec: 10         # 唤醒后等待指令的最长时间（硬顶）
+  cooldown_sec: 8                 # 唤醒后冷却，防连续触发
+  match_tolerance: 1              # 同音错字容错字数（自动按词长放大）
+
+chat:                            # 用户搭话的会话
+  idle_finish_sec: 8              # 最后一次输入/回复后空闲多久自动收尾会话。
+                                  # 不收尾的话 mode=chat 一直挂起唤醒监听——
+                                  # 聊过一次就再也喊不醒她（实测踩过）
+
+observe:
+  interval_idle_sec: 10           # 静止时轮询间隔
+  interval_active_sec: 3          # 检测到变化后的跟进间隔（保持 60s）
+  active_window_sec: 60
+  min_api_interval_sec: 5         # API 调用最小间隔（防刷）
+  diff_threshold: 12              # dHash 汉明距离阈值 0..64，需 tests/test_differ.py 标定
+  max_sentence_chars: 80          # 主动发言单句上限（TTS 速度预算，设计文档 §5）
+
+proactive:                       # 主动互动频率（设置窗「主动互动」可改）
+  mode: low                      # off=不主动互动 | low=5–10次/小时 | mid=10–20
+                                 # | high=20–30 | custom=用下面两个值（次/小时）
+  min_per_hour: 5                # mode=custom 时的最低频率
+  max_per_hour: 10               # mode=custom 时的最高频率，也是每小时硬上限
+                                 # 到点会随机隔 [3600/max, 3600/min] 秒说一句；
+                                 # 画面有大变动时仍会额外触发（不受此节奏限制）
+
+gate:
+  proactive_min_interval_sec: 30  # 主动发声最小间隔
+  max_proactive_per_hour: 10      # 每小时上限（启动时由 proactive 段自动覆盖，
+                                  # 改频率只改上面那段，别改这里）
+  daily_call_budget: 300          # 日 API 调用预算（观察+会话总计）
+  session_reserve_calls: 60       # 其中预留被动会话保底额度（20%）：余量≤此值观察循环提前挂起
+  daily_cost_budget_cny: 5        # 日费用预算（按官方价目表核算，实现时核实写入）
+  dnd_fullscreen: false            # 全屏应用（看视频/玩游戏/演示）时是否"完全安静"。
+                                   # false（默认）= 仍然按主动互动频率陪聊；
+                                   # true = 全屏时一句都不说。
+                                   # 注意：全屏下的"画面变动触发"始终关闭（视频画面
+                                   # 一直在动，那不是值得开口的信号，且极耗 API）。
+  title_blacklist: ["网银", "银行", "密码", "Password", "Keychain"]   # 隐私黑名单
+
+model:
+  base_url: https://api.deepseek.com
+  vision_model: deepseek-v4-flash-vision-exp   # 实验模型；官方文档注明旧模型名将转由
+                                              # DeepSeek-V4.1-Flash 服务并按 Flash 计费——
+                                              # 模型名只放这里，实现时以官方文档为准
+  chat_model: deepseek-v4-flash-vision-exp     # 会话复用同一模型（共享 system 前缀吃缓存）；
+                                              # 质量不够时改这一行即可，无需改代码
+  detail: low                          # 512×512 降尺度，每图硬顶 384 token
+  timeout_sec: 8
+  # 输出上限：留空 / null = 不限制（不向 API 传 max_tokens，由模型自然收尾）。
+  # 可在设置窗「最大输出 token」里改；填了数字才受限。
+  # 注意 deepseek-v4-flash-vision-exp 是推理模型：思考 token 也计入上限，
+  # 上限设太小（如 400）会出现"想满了正文为空"——无气泡无语音。
+  max_tokens_observe: null
+  max_tokens_chat: null
+
+voice:
+  engine: moss-nano                  # moss-nano | sapi
+  model_dir: models/moss-tts-nano-onnx
+  voices_dir: models/moss-voices     # 音色目录：<名字>/reference.wav（3–10s 干净人声）
+  voice_name: xiaojingyu             # register_voice.py 注册的音色名
+  threads: 6                         # onnxruntime 线程数：实测 2/4/6/8 中 6 最快
+                                     # （本机合成仅 ~0.7x 实时，线程数救不了，
+                                     # 所以播法改成"按句合成、整句交出"）
+  fallback: sapi                     # MOSS 不可用时的保底
+
+pet:
+  always_on_top: true
+  click_through: false                 # True 时鼠标穿透（不能拖拽/点击对话）
+  corner: bottom-right
+  scale: 1.0                           # 帧素材已是 320×180（见 scripts/prepare_assets.py），
+                                       # 1.0 = 不再二次缩放，边缘更锐利；调大可放大
+  topmost_reassert_sec: 30             # 置顶自检重 assert（防资源管理器重启/DPI 变更丢置顶）
+  fps: 12                              # 动画帧率（素材预解码时已降到 12fps）

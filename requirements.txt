@@ -1,0 +1,19 @@
+# little-whale-pet 依赖（Python 3.11+）
+
+PySide6>=6.8            # 桌宠窗口（透明置顶无边框 + 帧动画 + 输入框/设置弹窗）
+onnxruntime>=1.20       # MOSS-TTS-Nano 进程内推理（CPUExecutionProvider）
+numpy>=2.0              # dHash / PCM 缓冲
+soundfile               # 音色注册读音频 + 自检存 wav + 参考音频重采样
+sentencepiece           # MOSS-TTS-Nano 文本前端（tokenizer.model）
+scipy                   # 帧素材预处理（prepare_assets 的距离变换/形态学）
+mss                     # Windows 截屏
+openai                  # DeepSeek OpenAI 兼容客户端
+sounddevice             # 48kHz PCM 播放 + 16kHz 唤醒词采集（PortAudio）
+PyYAML                  # 声明式配置
+pywin32                 # 前台窗口标题 / 全屏检测 / SAPI5 保底
+vosk                    # 唤醒词离线识别（Kaldi）
+pypinyin                # 唤醒词拼音音节级模糊匹配（同音错字容错）
+pytest                  # 测试
+
+# 打包（仅开发机需要，见 scripts/build_exe.py）：
+#   pyinstaller

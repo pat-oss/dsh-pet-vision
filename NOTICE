@@ -1,0 +1,30 @@
+小鲸鱼桌宠（little-whale-pet）第三方素材与组件声明
+
+1. 角色动画素材 — dsh-pet
+   来源：https://github.com/PC2005-cloud/dsh-pet
+   本仓库 pet/assets/frames/ 下的 PNG 帧序列由 dsh-pet 的 VP9-Alpha webm
+   动画（assets/webm/）经 scripts/prepare_assets.py 预解码生成。
+   许可（依 dsh-pet 仓库「许可」一节）：
+   - 代码：MIT
+   - 素材（动画/提示词/源视频）：允许开源使用，禁止商用
+   - 二次创作作品在介绍、展示、分发处须附原作者 GitHub 地址：
+     https://github.com/PC2005-cloud/dsh-pet
+   本项目为个人本地使用；如需再分发，请遵守上述条款。
+
+2. TTS 模型与运行时 — MOSS-TTS-Nano（ONNX 导出）
+   模型：https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX
+   音频解码器：https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX
+   原始项目：https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Nano
+   运行时源码（已 vendor 至 vendor/moss_tts_nano/，Apache 2.0）来自上述
+   ONNX 仓库的浏览器参考实现，本工程做了三处本地化改动：
+   - tokenizer.model 改走 model_proto 加载（Windows 中文路径 NOT_FOUND）；
+   - torchaudio 依赖改为 soundfile + numpy 线性插值重采样；
+   - WeTextProcessing（pynini）替换为最小文本规整桩。
+   许可：Apache License 2.0
+   合规：只克隆自己或已获明确授权的声音；合成音频应在适当场合标注为合成产物。
+
+3. 参考实现（未拷贝代码，仅作工程对照）
+   - dsh-pet-indesktop（MerZlin，PySide6 独立桌宠同角色）：
+     https://github.com/MerZlin/dsh-pet-indesktop
+
+4. 其他依赖见 requirements.txt，各组件许可归其原作者。
