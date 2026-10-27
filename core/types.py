@@ -152,7 +152,11 @@ class RuntimeState:
     text_cooldown: dict[str, float] = field(default_factory=dict)  # 文本指纹 → 解冻时间
 
     def roll_hour(self, now: float) -> None:
-        if now - self.hour_window_start >= 3600:
+        # 负数差 = 窗口起点来自上一个开机周期（monotonic 已归零）→ 必须重置，
+        # 否则 spoke_this_hour 会卡在旧值上，撞到上限就永久 hourly-cap。
+        if (self.hour_window_start <= 0.0
+                or now < self.hour_window_start
+                or now - self.hour_window_start >= 3600):
             self.hour_window_start = now
             self.spoke_this_hour = 0
 

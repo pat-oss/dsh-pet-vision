@@ -63,6 +63,12 @@ def _build(throwing: bool = False, idle_finish_sec: int = 2):
      name, pv, style, addr) = load_config(paths.app_root() / "config.yaml", data_dir)
     store = StateStore(data_dir / "state.json", data_dir / "decisions.jsonl")
     store.set_mode("observe")
+    # 这两个用例要真实加载 MOSS 引擎（验证唤醒暂停的释放时序），需要模型权重。
+    # 开源仓库不含权重（models/ 只有 README），缺权重时跳过而不是报错——
+    # 否则新克隆的人跑 pytest 会看到 2 个"失败"，误以为是代码坏了。
+    if not list(Path(voice_cfg.model_dir).rglob("browser_poc_manifest.json")):
+        pytest.skip("缺少 MOSS 模型权重（先跑 scripts/download_models.py），"
+                    "跳过需要真实引擎的唤醒恢复测试")
     engine = MossNanoEngine(voice_cfg.model_dir, voice_cfg.voices_dir,
                           voice_cfg.voice_name, voice_cfg.threads, work_dir=data_dir)
     engine.load()

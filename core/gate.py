@@ -1,7 +1,8 @@
 """core/gate.py — SpeechGate：L 层唯一放行点（确定性代码，模型输出不可绕过）。
 
-主动模式查：30s 最小间隔 / ≤10 次每小时 / 日预算（余量 ≤ 保底额度时拒绝主动发言，
-把额度留给会话）/ 免打扰 / 黑名单。被动模式仅 2s 防连点。
+主动模式查：最小间隔 / 每小时上限（由 config 的 proactive 段派生）/
+日预算（余量 ≤ 保底额度时拒绝主动发言，把额度留给会话）/ 免打扰 / 黑名单。
+被动模式仅 2s 防连点。
 """
 
 from __future__ import annotations
@@ -33,6 +34,11 @@ class SpeechGate:
             return True, ""
 
         # 主动模式
+        # 运行期双保险：last_spoken_at 若是上一个开机周期写下的（值 > now），
+        # 单调时钟不可比，按"从没说过话"处理。否则 `now - last` 为负会恒小于
+        # 最小间隔，主动搭话永久静默（2026-10-27 事故，详见 state.py::_sanitize）。
+        if state.last_spoken_at > now:
+            state.last_spoken_at = 0.0
         if now - state.last_spoken_at < self.cfg.proactive_min_interval_sec:
             return False, "throttle"
         state.roll_hour(now)

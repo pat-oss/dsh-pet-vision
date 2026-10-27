@@ -55,6 +55,7 @@ class ObserveLoop(QThread):
         self._last_api_at = 0.0
         self._active_until = 0.0
         self._next_proactive_at = 0.0     # 首次进循环时按频率抽一次
+        self._nap_logged = False          # 挂起日志只打一次（进出各一条）
 
     def stop(self) -> None:
         self._stopped = True
@@ -87,6 +88,15 @@ class ObserveLoop(QThread):
             return "不主动互动"
         return f"{lo}–{hi} 次/小时（间隔约 {3600 / hi:.0f}–{3600 / lo:.0f}s）"
 
+    def _suspend_reason(self, now: float) -> str:
+        """观察循环为什么在打盹——必须能一句话说清，否则等于静默失效。"""
+        st = self.store.state
+        if now < st.suspended_until:
+            return f"连续调用失败退避，还剩 {st.suspended_until - now:.0f}s"
+        remaining = self.gate.cfg.daily_call_budget - st.calls_today
+        return (f"今日 API 已用 {st.calls_today}/{self.gate.cfg.daily_call_budget} 次，"
+                f"余量 {remaining} 只留给会话（保底 {self.gate.cfg.session_reserve_calls}）")
+
     # ---- 主循环 ----
 
     def run(self) -> None:
@@ -103,9 +113,17 @@ class ObserveLoop(QThread):
 
             # 预算进入保底区 / 退避挂起 → 打盹
             if self.gate.observe_suspended(now):
+                # 这条路径原来只发 nap 状态、不写日志：用户看到的是"她彻底不理我了"，
+                # 而日志里查不到任何原因。挂起必须留痕（进/出各一条）。
+                if not self._nap_logged:
+                    self.log_line.emit(f"[observe] 观察循环挂起：{self._suspend_reason(now)}")
+                    self._nap_logged = True
                 self.state_changed.emit("nap")
                 self.msleep(2000)
                 continue
+            if self._nap_logged:
+                self.log_line.emit("[observe] 观察循环已恢复")
+                self._nap_logged = False
 
             vision_on = mode == "observe"
             proactive_off = self.proactive_cfg.is_off()
@@ -250,7 +268,22 @@ class ObserveLoop(QThread):
             self._speak(decision.text)
             self.reschedule_proactive()      # 说完重新计时（间隔从这次开口算）
         elif decision.speak and decision.text:
-            self.log_line.emit(f"主动搭话被拦[{gate_reason}]")
+            # 被拦必须说清是"哪道闸、差多少"——只写 throttle 等于静默失效，
+            # 排查时会误以为是模型不说话。
+            detail = ""
+            if gate_reason == "throttle":
+                gap = now - self.store.state.last_spoken_at
+                detail = (f"（距上次发言 {gap:.0f}s < 最小间隔 "
+                          f"{self.gate.cfg.proactive_min_interval_sec:.0f}s）")
+            elif gate_reason == "hourly-cap":
+                detail = (f"（本小时已开口 {self.store.state.spoke_this_hour} 次，"
+                          f"上限 {self.gate.cfg.max_proactive_per_hour} 次/小时）")
+            elif gate_reason in ("budget-exhausted", "budget-reserve"):
+                detail = (f"（今日 API 已用 {self.store.state.calls_today}/"
+                          f"{self.gate.cfg.daily_call_budget} 次，余量留给会话）")
+            elif gate_reason == "cooldown":
+                detail = "（这句重复太多次，进冷却）"
+            self.log_line.emit(f"主动搭话被拦[{gate_reason}]{detail}")
         self.state_changed.emit("idle")
 
     # ---- 判断与放行 ----

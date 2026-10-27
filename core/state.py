@@ -11,10 +11,15 @@ import json
 import os
 import threading
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .types import RuntimeState
+
+# 持久化的 monotonic 时间戳最长合理剩余量（用于跨重启消毒）
+_MAX_COOLDOWN_SEC = 1800.0   # text_cooldown 上限（打转检测 600s，留余量）
+_MAX_SUSPEND_SEC = 600.0     # 退避挂起上限（与 loop 里 min(600, ...) 一致）
 
 
 class StateStore:
@@ -33,11 +38,54 @@ class StateStore:
         if self._state_path.is_file():
             try:
                 data = json.loads(self._state_path.read_text(encoding="utf-8"))
-                return RuntimeState(**{k: v for k, v in data.items()
-                                        if k in RuntimeState.__dataclass_fields__})
+                st = RuntimeState(**{k: v for k, v in data.items()
+                                    if k in RuntimeState.__dataclass_fields__})
+                return self._sanitize(st)
             except (OSError, json.JSONDecodeError, TypeError):
                 pass  # 状态损坏不致命：重置但保留日志
         return RuntimeState()
+
+    def _sanitize(self, st: RuntimeState) -> RuntimeState:
+        """跨重启的时间戳消毒（P0 缺陷修复，2026-10-27）。
+
+        monotonic() 每次开机从 0 重新计时，但 last_spoken_at / hour_window_start /
+        suspended_until / text_cooldown 都被持久化在 state.json 里。电脑重启后
+        旧值变成"未来时间"，于是 `now - last_spoken_at` 是负数，节流门第一道判断
+        `if now - last < 30` 永远成立 → **主动搭话永久静默**，而 API 照旧被调用
+        （屏幕上什么都不会发生，钱照样烧）。
+
+        实测：last_spoken_at=48264，当次开机 monotonic=15082 → 需要再跑 9.2 小时
+        才会"解冻"。这类故障用 `except: pass` 兜不住，必须在加载时显式纠正。
+        """
+        now = time.monotonic()
+        notes: list[str] = []
+
+        if st.last_spoken_at > now:
+            notes.append(f"last_spoken_at {st.last_spoken_at:.0f}s→0（旧开机周期）")
+            st.last_spoken_at = 0.0
+
+        if st.hour_window_start > now:
+            notes.append(f"hour_window_start {st.hour_window_start:.0f}s→now，"
+                         f"本小时计数 {st.spoke_this_hour}→0")
+            st.hour_window_start = now
+            st.spoke_this_hour = 0
+
+        if st.suspended_until > now + _MAX_SUSPEND_SEC:
+            notes.append(f"suspended_until {st.suspended_until:.0f}s→0")
+            st.suspended_until = 0.0
+
+        expired = [k for k, v in st.text_cooldown.items()
+                   if not isinstance(v, (int, float)) or v > now + _MAX_COOLDOWN_SEC]
+        for k in expired:
+            st.text_cooldown.pop(k, None)
+        if expired:
+            notes.append(f"text_cooldown 清理 {len(expired)} 条")
+
+        if notes:
+            # 必须可见：这类问题一旦静默，用户只会觉得"她不理我了"
+            print("[state] 检测到跨重启残留时间戳，已重置：" + "；".join(notes),
+                  flush=True)
+        return st
 
     def save(self) -> None:
         """原子写：tmp + os.replace。"""
