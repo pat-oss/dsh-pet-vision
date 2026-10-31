@@ -14,8 +14,9 @@ from typing import Iterable
 from openai import OpenAI
 from PIL import Image
 
-from core.prompts import (PROMPT_VERSION, build_chat_messages, build_observe_messages,
-                          build_proactive_messages, parse_decision_json)
+from core.prompts import (PROMPT_VERSION, build_chat_messages, build_consolidate_messages,
+                          build_observe_messages, build_proactive_messages,
+                          parse_consolidate_json, parse_decision_json)
 from core.types import Decision, JudgeConfig, Turn
 
 
@@ -46,10 +47,49 @@ def classify_error(exc: Exception) -> str:
 
 
 class VisionJudge:
-    def __init__(self, cfg: JudgeConfig, api_key: str) -> None:
+    def __init__(self, cfg: JudgeConfig, api_key: str,
+                 on_usage=None, on_failure=None, notes=None) -> None:
         self.cfg = cfg
         self._client = OpenAI(api_key=api_key, base_url=cfg.base_url, timeout=cfg.timeout_sec)
         self._json_mode = True  # 首次尝试 response_format；不被支持则自动降级
+        # 持久笔记（core/memory.NoteStore）。会话线程也会从 judge 上取它做提取，
+        # 避免同一份存储散落在通道里各传一遍。
+        self.notes = notes
+        # 用量回调做成可选：不给回调时行为与以前完全一致（测试里的假 judge 不受影响）。
+        # on_usage(prompt_tokens, completion_tokens, cached_tokens)
+        self._on_usage = on_usage
+        self._on_failure = on_failure
+
+    def _rendered_notes(self) -> str:
+        """给提示词尾部用的笔记片段；没有笔记或渲染失败都返回空串（调用方省略）。"""
+        if self.notes is None:
+            return ""
+        try:
+            return self.notes.render()
+        except Exception:      # noqa: BLE001 笔记坏了不许影响对话
+            return ""
+
+    def _emit_usage(self, resp) -> None:
+        """把 resp.usage 交给统计模块。各家字段名不一致，这里做兼容。"""
+        if self._on_usage is None:
+            return
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            return
+        prompt = _as_int(getattr(usage, "prompt_tokens", 0))
+        completion = _as_int(getattr(usage, "completion_tokens", 0))
+        try:
+            self._on_usage(prompt, completion, _cached_tokens(usage))
+        except Exception:      # noqa: BLE001 统计出错绝不能拖累主流程
+            pass
+
+    def _notify_failure(self) -> None:
+        if self._on_failure is None:
+            return
+        try:
+            self._on_failure()
+        except Exception:      # noqa: BLE001
+            pass
 
     # ---- 观察模式 ----
 
@@ -74,7 +114,8 @@ class VisionJudge:
         所以用独立的 system 提示（prompts.proactive_system_prompt）。
         """
         started = time.monotonic()
-        messages = build_proactive_messages(frame_b64, recent, detail=self.cfg.detail)
+        messages = build_proactive_messages(frame_b64, recent, detail=self.cfg.detail,
+                                            notes=self._rendered_notes())
         raw = self._chat(messages, self.cfg.chat_model, self.cfg.max_tokens_chat)
         latency_ms = int((time.monotonic() - started) * 1000)
         speak, text, reason = parse_decision_json(raw)
@@ -96,7 +137,8 @@ class VisionJudge:
         """会话回复。frame_b64 非空时附带当前屏幕截图——
         否则主人说"看看我屏幕"她收不到图，只能凭文字瞎猜。"""
         messages = build_chat_messages(list(history), user_text, frame_b64,
-                                       detail=self.cfg.detail)
+                                       detail=self.cfg.detail,
+                                       notes=self._rendered_notes())
         budget = self.cfg.max_tokens_chat
         text = self._chat(messages, self.cfg.chat_model, budget).strip()
         if not text and budget is not None:
@@ -111,6 +153,28 @@ class VisionJudge:
                 text = ""
         return text
 
+    # ---- 记忆整理（会话结束后，让宠物自己把要点并入笔记） ----
+
+    def consolidate(self, transcript: str) -> tuple[list[tuple[str, str]], list[str]]:
+        """从一段对话里提炼长期记忆，并与已有笔记合并。返回 (remember, drop)。
+
+        这是唯一一处"模型自动写记忆"的入口，所以：
+        - 走 chat_model（纯文本任务，不需要视觉模型）；
+        - 已有笔记用 render 的放宽参数（40 条 / 1500 字），比对话注入宽得多，
+          否则模型看不到全量笔记，会重复追加而不是合并；
+        - 任何异常都向上抛，由调用方（主线程的后台任务）决定怎么记日志——
+          这里吞掉就变成"静默失效"，排查成本极高（本工程踩过四次）。
+        """
+        notes = ""
+        if self.notes is not None:
+            try:
+                notes = self.notes.render(max_items=40, max_chars=1500)
+            except Exception:      # noqa: BLE001 笔记坏了不该让整理整体失败
+                notes = ""
+        messages = build_consolidate_messages(transcript, notes)
+        raw = self._chat(messages, self.cfg.chat_model, self.cfg.max_tokens_chat)
+        return parse_consolidate_json(raw)
+
     # ---- 内部 ----
 
     def _chat(self, messages: list[dict], model: str,
@@ -122,15 +186,44 @@ class VisionJudge:
         if self._json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         try:
-            resp = self._client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            if self._json_mode and _mentions_response_format(exc):
-                self._json_mode = False  # 实验模型不支持 json_object：永久降级文本协议
-                kwargs.pop("response_format")
+            try:
                 resp = self._client.chat.completions.create(**kwargs)
-            else:
-                raise
+            except Exception as exc:
+                if self._json_mode and _mentions_response_format(exc):
+                    self._json_mode = False  # 实验模型不支持 json_object：永久降级文本协议
+                    kwargs.pop("response_format")
+                    resp = self._client.chat.completions.create(**kwargs)
+                else:
+                    raise
+        except Exception:
+            self._notify_failure()   # 失败也要记账：成功率是体感的一部分
+            raise
+        self._emit_usage(resp)
         return resp.choices[0].message.content or ""
+
+
+def _as_int(value) -> int:
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def _cached_tokens(usage) -> int:
+    """命中缓存的输入 token 数。
+
+    不同厂商/版本字段不一样，按顺序试，取到就停：
+    - OpenAI 风格：usage.prompt_tokens_details.cached_tokens
+    - DeepSeek 风格：usage.prompt_cache_hit_tokens
+    取不到就当 0（命中率会显示为 0，而不是报错或虚高）。
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is not None:
+        value = getattr(details, "cached_tokens", None)
+        if isinstance(value, (int, float)):
+            return int(value)
+    for name in ("prompt_cache_hit_tokens", "cached_tokens"):
+        value = getattr(usage, name, None)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return 0
 
 
 def _mentions_response_format(exc: Exception) -> bool:

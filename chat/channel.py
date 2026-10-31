@@ -12,7 +12,8 @@ from chat.session import ChatSession, IDLE_FINISH_SEC
 
 class ChatChannel:
     def __init__(self, judge, store, gate, player, engine, frame_source=None,
-                 idle_finish_sec: int = IDLE_FINISH_SEC, on_ended=None) -> None:
+                 idle_finish_sec: int = IDLE_FINISH_SEC, on_ended=None,
+                 on_transcript=None) -> None:
         self._judge = judge
         self._store = store
         self._gate = gate
@@ -27,6 +28,8 @@ class ChatChannel:
         # 关键：必须在 start() 前连好，否则会话若很快结束（网络 401/内部异常），
         # finished_session 会在连接建立前发射，回调永远错过 → 唤醒被永久暂停。
         self._on_ended = on_ended
+        # 会话收尾 → 把对话文本交给记忆整理（main 里起后台线程，立即返回）
+        self._on_transcript = on_transcript
 
     @property
     def active(self) -> bool:
@@ -42,7 +45,8 @@ class ChatChannel:
         session = ChatSession(self._judge, self._store, self._gate,
                               self._player, self._engine, text,
                               frame_source=self._frame_source,
-                              idle_finish_sec=self._idle_finish_sec)
+                              idle_finish_sec=self._idle_finish_sec,
+                              on_transcript=self._on_transcript)
         # 必须先连好"结束"信号再 start()：start() 后线程可能立刻跑完并发射
         # finished_session，晚一拍连接就会错过（竞态 → 唤醒监听永久暂停）。
         if self._on_ended is not None:

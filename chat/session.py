@@ -28,6 +28,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from core.memory import extract_from, forget_target
 from core.state import StateStore
 from core.types import Turn
 from observe.judge import VisionJudge
@@ -62,7 +63,8 @@ class ChatSession(QThread):
 
     def __init__(self, judge: VisionJudge, store: StateStore, gate, player, engine,
                  first_user_text: str, frame_source=None,
-                 idle_finish_sec: int = IDLE_FINISH_SEC) -> None:
+                 idle_finish_sec: int = IDLE_FINISH_SEC,
+                 on_transcript=None) -> None:
         super().__init__()
         self.judge = judge
         self.store = store
@@ -79,6 +81,69 @@ class ChatSession(QThread):
         # 取当前屏幕截图的回调（视觉功能开启时由 main 注入）。
         # 不给的话主人说"看看我屏幕"她只能凭文字瞎猜——实测就是这个坑。
         self.frame_source = frame_source
+        # 持久笔记挂在 judge 上（同一份存储不散落重复注入）。
+        # 只从用户明说的句子里规则提取，不额外调 API。
+        self.notes = getattr(judge, "notes", None)
+        # 会话结束后的记忆整理回调：**只把文本交出去就必须立刻返回**。
+        # 这里绝不能同步调 API——会话线程多跑一秒，主线程 _on_finished 里的
+        # session.wait(3000) 就多卡一秒 UI（真会卡）。
+        self._on_transcript = on_transcript
+
+    def _absorb(self, user_text: str) -> None:
+        """记住主人的话里的事实；「忘记X」则从笔记里抹掉。
+
+        在回复之前调用：这样"记住我叫小明"当轮就能用上，而不是要等下一句。
+        """
+        if self.notes is None:
+            return
+        try:
+            target = forget_target(user_text)
+            if target:
+                removed = self.notes.remove_matching(target)
+                if removed:
+                    self.log_line.emit(f"已忘记 {removed} 条关于「{target}」的记忆")
+                return
+            for kind, content in extract_from(user_text):
+                note = self.notes.add(content, kind)
+                if note is not None:
+                    self.log_line.emit(f"记下了：{content}")
+        except Exception as exc:      # noqa: BLE001 记忆坏了不许影响对话
+            self.log_line.emit(f"记忆写入失败（已忽略）: {exc}")
+
+    def _transcript_text(self, max_turns: int = 12, max_chars: int = 2200) -> str:
+        """把本次会话折成给「记忆整理」看的纯文本。
+
+        只取最近 max_turns 轮：整理是提炼，不是全文分析，长会话后半段才是重点。
+        角色名用"主人/我"而不是 user/assistant——提示词里就是这么描述任务的，
+        保持术语一致模型更不容易跑偏。
+        """
+        lines: list[str] = []
+        for turn in self.history[-max_turns:]:
+            who = "主人" if turn.role == "user" else "我"
+            text = (turn.text or "").strip()
+            if text:
+                lines.append(f"{who}：{text}")
+        return "\n".join(lines)[-max_chars:]
+
+    def _hand_off_transcript(self) -> None:
+        """会话收尾时把对话文本交给外部做记忆整理。
+
+        门槛刻意设得低但不为零：一句"你好"不值得多烧一次 API，
+        但一两句有信息量的对话就该记下来。回调必须立刻返回（见 __init__ 注释）。
+        """
+        if self._on_transcript is None:
+            return
+        user_chars = sum(len(t.text or "") for t in self.history if t.role == "user")
+        if user_chars < 8:
+            _dbg(f"跳过记忆整理：本次主人只说了 {user_chars} 字")
+            return
+        transcript = self._transcript_text()
+        if not transcript:
+            return
+        try:
+            self._on_transcript(transcript)
+        except Exception as exc:      # noqa: BLE001 整理坏了不许影响收尾
+            _dbg(f"记忆整理回调失败(忽略): {exc!r}")
 
     def _current_frame_b64(self) -> str | None:
         if self.frame_source is None:
@@ -112,6 +177,7 @@ class ChatSession(QThread):
                 user_text = self._pending.pop(0)
                 self._turn += 1
                 self.history.append(Turn(role="user", text=user_text))
+                self._absorb(user_text)      # 先吸收再回复：当轮就能引用
 
                 self.state_changed.emit("think")
                 self.thinking.emit()          # UI 显示"思考中…"，让人知道她在反应
@@ -188,3 +254,7 @@ class ChatSession(QThread):
                 self.finished_session.emit()
             except Exception as exc:
                 _dbg(f"finished_session.emit 失败: {exc!r}")
+            # 记忆整理放在最后：必须等"会话已结束"这一事实先成立（mode 已恢复
+            # observe、唤醒监听已解绑），否则整理期间用户喊名字会没反应。
+            # 回调本身只起线程，不会拖长这里的执行时间。
+            self._hand_off_transcript()

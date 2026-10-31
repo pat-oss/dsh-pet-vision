@@ -43,7 +43,9 @@ def test_hourly_cap(tmp_path: Path) -> None:
 
 
 def test_budget_reserve(tmp_path: Path) -> None:
-    gate, store = make_gate(tmp_path)
+    """启用预算限制时才按日预算/保底额度收口。"""
+    store = StateStore(tmp_path / "state.json", tmp_path / "decisions.jsonl")
+    gate = SpeechGate(GateConfig(budget_enabled=True), store)
     now = 1000.0
     store.state.calls_today = 250          # 余量 50 ≤ 保底 60
     store.state.calls_day = time.strftime("%Y-%m-%d")
@@ -53,6 +55,25 @@ def test_budget_reserve(tmp_path: Path) -> None:
     store.state.calls_today = 100
     assert gate.allow("proactive", now + 100) == (True, "")
     print("PASS 预算保底区（余量≤60 拒绝主动发言，留给会话）")
+
+
+def test_budget_disabled_by_default(tmp_path: Path) -> None:
+    """默认不限制调用次数（2026-10-31 用户拍板）：花销改用用量面板事后可见。
+
+    反向断言：解除预算限制不等于放行一切——连续失败退避仍然要生效。
+    """
+    gate, store = make_gate(tmp_path)
+    now = 1000.0
+    store.state.calls_today = 9999          # 远超旧预算，本该被拦
+    store.state.calls_day = time.strftime("%Y-%m-%d")
+    store.save()
+    assert gate.allow("proactive", now + 100) == (True, "")
+    assert gate.observe_suspended(now + 100) is False
+
+    store.state.suspended_until = now + 200   # 退避仍需生效
+    assert gate.observe_suspended(now + 100) is True
+    assert gate.allow("proactive", now + 100) == (False, "suspended")
+    print("PASS 默认不设预算上限，但失败退避仍然收口")
 
 
 def test_reactive_spam(tmp_path: Path) -> None:
@@ -86,6 +107,7 @@ def main() -> None:
         test_proactive_throttle(tmp)
         test_hourly_cap(tmp)
         test_budget_reserve(tmp)
+        test_budget_disabled_by_default(tmp)
         test_reactive_spam(tmp)
         test_concurrent_counting(tmp)
     print("\n全部通过。")

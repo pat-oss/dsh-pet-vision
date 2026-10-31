@@ -44,12 +44,15 @@ class SpeechGate:
         state.roll_hour(now)
         if state.spoke_this_hour >= self.cfg.max_proactive_per_hour:
             return False, "hourly-cap"
-        remaining = self.cfg.daily_call_budget - state.calls_today
-        if remaining <= 0:
-            return False, "budget-exhausted"
-        if remaining <= self.cfg.session_reserve_calls:
-            # 余量进入保底区：留给被动会话，观察循环挂起
-            return False, "budget-reserve"
+        # 预算限制默认关闭（GateConfig.budget_enabled=False）：花销靠用量面板事后可见，
+        # 不再事前拦。开着的时候才按日预算/会话保底额度收口。
+        if self.cfg.budget_enabled:
+            remaining = self.cfg.daily_call_budget - state.calls_today
+            if remaining <= 0:
+                return False, "budget-exhausted"
+            if remaining <= self.cfg.session_reserve_calls:
+                # 余量进入保底区：留给被动会话，观察循环挂起
+                return False, "budget-reserve"
         if now < state.suspended_until:
             return False, "suspended"
         return True, ""
@@ -58,9 +61,14 @@ class SpeechGate:
         self._last_reactive = now
 
     def observe_suspended(self, now: float) -> bool:
-        """观察循环是否该挂起（预算进入保底区或退避中）。"""
+        """观察循环是否该挂起（预算进入保底区或退避中）。
+
+        预算限制关掉以后只剩"连续失败退避"这一种挂起原因（见 GateConfig.budget_enabled）。
+        """
         state = self.store.state
         if now < state.suspended_until:
             return True
+        if not self.cfg.budget_enabled:
+            return False
         remaining = self.cfg.daily_call_budget - state.calls_today
         return remaining <= self.cfg.session_reserve_calls

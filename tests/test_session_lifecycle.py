@@ -20,6 +20,13 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 显式建 QApplication：跨线程 signal 依赖 Qt 的事件分发器，没有应用对象时
+# QEventLoop 永远等不到 finished_session（单独跑本文件会挂死，全量跑时靠
+# test_pet_menu 先建过才侥幸通过——这种隐式顺序依赖必须去掉）。
+from PySide6.QtWidgets import QApplication      # noqa: E402
+
+_APP = QApplication.instance() or QApplication([])
+
 
 def _fakes():
     events: list[tuple] = []

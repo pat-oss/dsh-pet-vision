@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from core.usage import format_snapshot
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -84,11 +85,17 @@ class SetupDialog(QDialog):
                  current_proactive_mode: str = "low",
                  current_proactive_min: int = 5, current_proactive_max: int = 10,
                  current_fullscreen_quiet: bool = False,
+                 current_auto_memory: bool = True,
+                 usage=None, memory=None,
                  first_run: bool = True, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("小鲸鱼 · 首次设置" if first_run else "小鲸鱼 · 重新设置")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
         self._mic_worker: _MicTestWorker | None = None
+        # 用量统计（core.usage.UsageStore）与持久笔记（core.memory.NoteStore）。
+        # 两者都是可选注入：不传 = 这两个分区显示"未接入"，不影响其余设置。
+        self._usage = usage
+        self._memory = memory
 
         intro = QLabel(
             "欢迎把小鲸鱼领回家～\n"
@@ -188,6 +195,53 @@ class SetupDialog(QDialog):
         form.addRow("", self.hint_maxtok)
         self._update_maxtok_hint()
 
+        # ---- 用量（只读） ----
+        # 口径写在界面上，避免"命中率"这种词各有各的理解。
+        self.lbl_usage = QLabel("（暂无数据）")
+        self.lbl_usage.setWordWrap(True)
+        self.lbl_usage.setStyleSheet("color: gray; font-size: 11px;")
+        form.addRow("用量", self.lbl_usage)
+        usage_row = QHBoxLayout()
+        usage_row.setSpacing(4)
+        self.btn_usage_refresh = QPushButton("刷新")
+        self.btn_usage_refresh.clicked.connect(self._refresh_usage)
+        self.btn_usage_clear = QPushButton("清空统计")
+        self.btn_usage_clear.clicked.connect(self._clear_usage)
+        usage_row.addWidget(self.btn_usage_refresh)
+        usage_row.addWidget(self.btn_usage_clear)
+        usage_row.addStretch(1)
+        usage_box = QWidget()
+        usage_box.setLayout(usage_row)
+        form.addRow("", usage_box)
+
+        # ---- 记忆与隐私 ----
+        # 笔记是明文存本机，所以"查看"和"清除"必须都能点得着——
+        # 只给个开关不给人看内容，等于没给隐私。
+        self._memory = memory
+        self.lbl_memory = QLabel("（暂无笔记）")
+        self.lbl_memory.setWordWrap(True)
+        self.lbl_memory.setStyleSheet("color: gray; font-size: 11px;")
+        form.addRow("记忆", self.lbl_memory)
+
+        # 自动整理：对话结束后让她自己提炼要点并合并旧笔记。
+        # 代价是每次会话多一次 API 调用，所以给个开关让用户自己定。
+        self.chk_auto_memory = QCheckBox("对话结束后自己整理记忆（会多一次 API 调用）")
+        self.chk_auto_memory.setChecked(bool(current_auto_memory))
+        form.addRow("", self.chk_auto_memory)
+
+        mem_row = QHBoxLayout()
+        mem_row.setSpacing(4)
+        self.btn_mem_view = QPushButton("查看笔记…")
+        self.btn_mem_view.clicked.connect(self._view_notes)
+        self.btn_mem_clear = QPushButton("清除全部笔记")
+        self.btn_mem_clear.clicked.connect(self._clear_notes)
+        mem_row.addWidget(self.btn_mem_view)
+        mem_row.addWidget(self.btn_mem_clear)
+        mem_row.addStretch(1)
+        mem_box = QWidget()
+        mem_box.setLayout(mem_row)
+        form.addRow("", mem_box)
+
         self.btn_mic = QPushButton("测试麦克风（2 秒）")
         self.btn_mic.clicked.connect(self._test_mic)
         self.lbl_mic = QLabel("")
@@ -199,6 +253,9 @@ class SetupDialog(QDialog):
         mic_box = QWidget()
         mic_box.setLayout(mic_row)
         form.addRow("麦克风", mic_box)
+
+        self._refresh_usage()
+        self._refresh_memory()
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -305,6 +362,71 @@ class SetupDialog(QDialog):
         if idx >= 0:
             self.cmb_voice.setCurrentIndex(idx)
 
+    # ---- 用量 / 记忆隐私 ----
+
+    def _refresh_usage(self) -> None:
+        """把用量快照渲染进标签。没接统计就直说，不留白。"""
+        if self._usage is None:
+            self.lbl_usage.setText("（未接入统计）")
+            return
+        try:
+            self.lbl_usage.setText(format_snapshot(self._usage.snapshot()))
+        except Exception as exc:      # noqa: BLE001 统计面板坏了不能拖累设置窗
+            self.lbl_usage.setText(f"（读取失败：{exc}）")
+
+    def _clear_usage(self) -> None:
+        if self._usage is None:
+            return
+        try:
+            self._usage.reset_all()
+        except Exception as exc:      # noqa: BLE001
+            self.lbl_usage.setText(f"（清空失败：{exc}）")
+            return
+        self._refresh_usage()
+
+    def _view_notes(self) -> None:
+        """把笔记原文摊开给人看——看不见内容就谈不上隐私。"""
+        if self._memory is None:
+            QMessageBox.information(self, "记忆", "（未接入笔记）")
+            return
+        notes = self._memory.all()
+        if not notes:
+            QMessageBox.information(
+                self, "记忆",
+                "还没记住任何事。\n说一句「记住我明天要交论文」，她就会记下来。")
+            return
+        shown = notes[-50:]
+        body = "\n".join(f"{n.ts[:16]}　{n.text}" for n in shown)
+        QMessageBox.information(
+            self, "记忆",
+            f"共 {len(notes)} 条，以下显示最近 {len(shown)} 条：\n\n{body}")
+
+    def _clear_notes(self) -> None:
+        if self._memory is None:
+            return
+        count = self._memory.count()
+        if not count:
+            QMessageBox.information(self, "记忆", "没有可清除的笔记。")
+            return
+        answer = QMessageBox.question(
+            self, "清除笔记",
+            f"将删除全部 {count} 条记忆，不可恢复。确定吗？")
+        if answer == QMessageBox.StandardButton.Yes:
+            try:
+                removed = self._memory.clear()
+            except Exception as exc:      # noqa: BLE001
+                QMessageBox.warning(self, "记忆", f"清除失败：{exc}")
+                return
+            self._refresh_memory()
+            QMessageBox.information(self, "记忆", f"已清除 {removed} 条笔记。")
+
+    def _refresh_memory(self) -> None:
+        if self._memory is None:
+            self.lbl_memory.setText("（未接入笔记）")
+            return
+        count = self._memory.count()
+        self.lbl_memory.setText(f"已记住 {count} 条" if count else "（还没记住任何事）")
+
     def _test_mic(self) -> None:
         self.btn_mic.setEnabled(False)
         self.lbl_mic.setText("录音中……请随便说几句话")
@@ -364,4 +486,5 @@ class SetupDialog(QDialog):
             "proactive_min": self.spn_min.value(),
             "proactive_max": self.spn_max.value(),
             "fullscreen_quiet": self.chk_fullscreen.isChecked(),
+            "auto_memory": self.chk_auto_memory.isChecked(),
         }

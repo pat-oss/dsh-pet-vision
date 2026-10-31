@@ -16,6 +16,7 @@ import argparse
 import os
 import random
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -30,7 +31,9 @@ from core import paths
 from core.prefs import deep_merge, load_prefs, save_prefs
 from core.prompts import configure_persona
 from core.secrets import get_api_key, set_api_key
+from core.memory import NoteStore
 from core.state import StateStore
+from core.usage import UsageStore
 from core.types import (ChatConfig, GateConfig, JudgeConfig, ObserveConfig,
                         PetConfig, ProactiveConfig, VoiceConfig, WakeConfig)
 from observe.differ import FrameDiffer
@@ -189,6 +192,13 @@ class PetApp:
         self.container = Container()
         self.store = StateStore(self.data_dir / "state.json",
                                 self.data_dir / "decisions.jsonl")
+        # 用量统计（分小时/天/月/总计 + 本次启动以来）。
+        # 磁盘位置与 state 同级，清隐私时一并处理。
+        self.usage = UsageStore(self.data_dir / "usage.json")
+        # 持久笔记：跨会话记住关于主人的事实（明文、可读、可精确删除）
+        self.memory = NoteStore(self.data_dir / "notes.jsonl")
+        # 退出前兜住还没落盘的最后一段记账
+        self.app.aboutToQuit.connect(self.usage.flush)
         self.screen = ScreenSource()
         self.differ = FrameDiffer()
         self.gate = SpeechGate(self.gate_cfg, self.store)
@@ -196,8 +206,12 @@ class PetApp:
         self.container.register("gate", lambda: self.gate)
         self.container.register("screen", lambda: self.screen)
         self.container.register("differ", lambda: self.differ)
+        self.container.register("usage", lambda: self.usage)
+        self.container.register("memory", lambda: self.memory)
 
         self._setup_offered = False
+        # 记忆整理是否在跑（同一时刻只允许一个，免得几次会话收尾叠着打 API）
+        self._consolidating = False
         # 后台线程的强引用（QThread 被 GC 掉而线程仍在跑 = 直接崩，见 _warm_async）
         self._bg_threads: list = []
         # 视觉功能开关（托盘可切）。默认开：与 observe 模式一致，
@@ -235,6 +249,8 @@ class PetApp:
                           current_proactive_min=self.proactive_cfg.min_per_hour,
                           current_proactive_max=self.proactive_cfg.max_per_hour,
                           current_fullscreen_quiet=self.gate_cfg.dnd_fullscreen,
+                          current_auto_memory=self.chat_cfg.auto_consolidate,
+                          usage=self.usage, memory=self.memory,
                           first_run=first_run,
                           parent=getattr(self, "window", None))
         if dlg.exec() != SetupDialog.DialogCode.Accepted:
@@ -264,6 +280,9 @@ class PetApp:
         # 全屏时是否完全安静（看视频/玩游戏时要不要打扰）
         fullscreen_quiet = bool(values.get("fullscreen_quiet", False))
         prefs["gate"] = {**(prefs.get("gate") or {}), "dnd_fullscreen": fullscreen_quiet}
+        # 自动整理记忆（会话结束后自己提炼要点）
+        auto_memory = bool(values.get("auto_memory", True))
+        prefs["chat"] = {**(prefs.get("chat") or {}), "auto_consolidate": auto_memory}
         save_prefs(self.data_dir, prefs)
         # 热生效：唤醒词/音色/人设称呼/输出上限
         old_voice, old_addr = self.voice_cfg.voice_name, self.user_address
@@ -283,6 +302,11 @@ class PetApp:
         if self.loop is not None:
             self.loop.proactive_cfg = self.proactive_cfg
             self.loop.reschedule_proactive()
+        # 自动整理记忆热生效：开关关掉时把回调摘掉，下一次会话收尾就不再调 API
+        self.chat_cfg.auto_consolidate = auto_memory
+        if self.channel is not None:
+            self.channel._on_transcript = (self._schedule_consolidation
+                                           if auto_memory else None)
         if self.engine is not None:
             self.engine.set_voice(values["voice_name"])
         # 音色或称呼变了 → 缓存作废（音频里带着旧音色/旧称呼），后台重预热
@@ -406,7 +430,7 @@ class PetApp:
 
         # ---- 宠物窗口（先建好并显示，设置窗压在它上面） ----
         self.window = PetWindow(paths.app_root() / "pet" / "assets" / "frames",
-                                self.pet_cfg)
+                                self.pet_cfg, usage=self.usage)
         self.window.animator.start()
         self.window.show()
 
@@ -427,7 +451,14 @@ class PetApp:
                           "点托盘「重新设置…」补上。", msecs=10000)
 
         # ---- DeepSeek 客户端 ----
-        self.judge = VisionJudge(self.judge_cfg, api_key) if api_key else None
+        # 用量回调接到 UsageStore：三条路径（观察/主动/会话）都经过这里，
+        # 只需要在这一个地方记账，不用每个调用点各写一遍。
+        self.judge = VisionJudge(
+            self.judge_cfg, api_key,
+            on_usage=lambda p, c, cached: self.usage.record(p, c, cached),
+            on_failure=self.usage.record_failure,
+            notes=self.memory,
+        ) if api_key else None
         self.channel = ChatChannel(self.judge, self.store, self.gate,
                                    self.player, self.engine,
                                    frame_source=self._frame_b64,
@@ -436,6 +467,11 @@ class PetApp:
                                    # 在 start() 前连接（见 ChatChannel.submit），
                                    # 消除竞态，避免"聊一次就再也喊不醒"。
                                    on_ended=self._on_session_finished,
+                                   # 会话收尾后自动整理记忆（chat.auto_consolidate）。
+                                   # 关掉时传 None，只剩「记住X」的规则提取。
+                                   on_transcript=(self._schedule_consolidation
+                                                  if self.chat_cfg.auto_consolidate
+                                                  else None),
                                    ) if self.judge else None
 
         # ---- 观察循环 ----
@@ -619,6 +655,47 @@ class PetApp:
 
     def _on_session_finished(self) -> None:
         self._set_wake_paused("session", False)
+
+    def _schedule_consolidation(self, transcript: str) -> None:
+        """会话收尾 → 起后台线程整理记忆（提炼要点 + 与旧笔记合并）。
+
+        三条铁律：
+        1. **本函数必须立刻返回**。它由 ChatSession 在 finally 里调用，而主线程
+           处理 finished_session 时会对会话线程 `wait(3000)`——同步调 API 就是
+           卡 3 秒 UI。
+        2. **串行**：同一时刻只允许一个整理任务。连续几次短会话各自收尾时，
+           并发打 API 既浪费又容易撞限流。
+        3. **失败只记日志**：整理是锦上添花，任何异常都不能影响下一次对话。
+           这里刻意 print 而不是静默 pass（本工程四次静默失效的教训）。
+
+        关于线程引用：这里用原生 threading.Thread 而不是 QThread，所以**不需要**
+        挂进 _bg_threads——Python 的 threading 模块内部持有运行中线程的引用，
+        不存在"QThread 被 GC 掉而线程还在跑"那类硬崩。
+        """
+        if not transcript or self.judge is None or self.memory is None:
+            return
+        if self._consolidating:
+            print("[memory] 上一次整理还没结束，跳过本次会话")
+            return
+        self._consolidating = True
+
+        def work() -> None:
+            try:
+                remember, drop = self.judge.consolidate(transcript)
+                if not remember and not drop:
+                    print("[memory] 本次对话没有值得长期记的内容")
+                    return
+                added, removed = self.memory.apply_consolidation(remember, drop)
+                print(f"[memory] 整理完成：新增 {added} 条 / 合并删除 {removed} 条"
+                      f"（现有 {self.memory.count()} 条）")
+                for kind, text in remember:
+                    print(f"[memory]   + [{kind}] {text}")
+            except Exception as exc:      # noqa: BLE001 整理失败绝不影响对话
+                print(f"[memory] 整理失败（已忽略）：{exc}")
+            finally:
+                self._consolidating = False
+
+        threading.Thread(target=work, name="memory-consolidate", daemon=True).start()
 
     def _on_thinking(self) -> None:
         """思考中的可见反馈：API 要 1–3s，没提示的话像她没反应。"""

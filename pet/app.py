@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QIcon, QPainter
 from PySide6.QtWidgets import (QApplication, QLabel, QLineEdit, QMenu,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from pet.anim import FrameAnimator
+from pet.stats import StatsPanel
 
 WINDOW_W, WINDOW_H = 320, 180   # 640×360 帧 × scale 0.5
 
@@ -24,9 +25,11 @@ class PetWindow(QWidget):
     vision_toggled = Signal(bool)          # 视觉功能开关（让她持续看屏幕）
     dnd_toggled = Signal(bool)             # 专注模式（免打扰），默认关视觉
 
-    def __init__(self, frames_root: Path, cfg) -> None:
+    def __init__(self, frames_root: Path, cfg, usage=None) -> None:
         super().__init__()
         self.cfg = cfg
+        self._usage = usage          # core.usage.UsageStore | None
+        self._panel = None           # 懒创建：输入框上方的用量面板
         self._drag_pos = None
         self._click_anim_at = 0.0
 
@@ -88,6 +91,15 @@ class PetWindow(QWidget):
         self._bubble_timer = QTimer(self)
         self._bubble_timer.setSingleShot(True)
         self._bubble_timer.timeout.connect(self.bubble.hide)
+
+        # 面板可见时才刷新的定时器：统计是别的线程在累加的，面板静置太久
+        # 会显示几分钟前的旧数字（看着像坏了）。不可见就 stop，避免空转。
+        self._panel_timer = QTimer(self)
+        self._panel_timer.setInterval(2000)
+        self._panel_timer.timeout.connect(self._refresh_panel)
+
+        # 输入框里按 Esc 收起（占位提示里一直写着，但之前没实现）
+        self.input.installEventFilter(self)
 
     # ---- 位置与置顶 ----
 
@@ -167,23 +179,78 @@ class PetWindow(QWidget):
     # ---- 交互 ----
 
     def toggle_input(self) -> None:
+        """单击/菜单的统一入口：输入框与用量面板一起出现、一起收起。"""
         if self.input.isVisible():
-            self.input.hide()
+            self.hide_input()
         else:
-            self.input.show()
-            self.input.setFocus()
+            self.show_input()
+
+    def show_input(self) -> None:
+        """显示输入框，并把用量面板贴在它上方（不是替代，两者同时可见）。
+
+        顺序有意为之：先把面板摆出来，最后才 setFocus 输入框——
+        面板虽然是"不激活"窗口类型，但 raise_ 在某些壳层下仍可能抢走焦点，
+        最后一步收回来才稳（否则点开却打不了字）。
+        """
+        self.input.show()
+        self._show_panel()
+        # 宠物是 Frameless+Tool 窗口，默认不会自己激活；不显式激活的话
+        # setFocus 只是"窗口内焦点"，键盘输入仍然打不进来。
+        self.activateWindow()
+        self.input.setFocus()
+
+    def hide_input(self) -> None:
+        self.input.hide()
+        self._hide_panel()
 
     def _submit_text(self) -> None:
         text = self.input.text().strip()
         if text:
             self.user_text_submitted.emit(text)
             self.input.clear()
-            self.input.hide()
+            self.hide_input()
+
+    # ---- 用量面板 ----
+
+    def _ensure_panel(self):
+        if self._panel is None:
+            self._panel = StatsPanel(self._usage)
+        return self._panel
+
+    def _show_panel(self) -> None:
+        panel = self._ensure_panel()
+        panel.refresh()
+        panel.show()          # 先显示再定位：adjustSize 需要控件已完成布局
+        self._sync_panel()
+        panel.raise_()
+        self._panel_timer.start()
+
+    def _hide_panel(self) -> None:
+        self._panel_timer.stop()
+        if self._panel is not None:
+            self._panel.hide()
+
+    def _refresh_panel(self) -> None:
+        if self._panel is not None and self._panel.isVisible():
+            self._panel.refresh()
+
+    def _sync_panel(self) -> None:
+        """把面板挪到窗口正上方（输入框就在窗口顶部，视觉上就是"贴输入框上边"）。
+
+        传的是**整个窗口矩形**而不是顶部一条线：屏幕顶端放不下时，
+        `place_above` 要按窗口底边把面板翻到下面去，高度传 1 会算错。
+        """
+        if self._panel is None or not self._panel.isVisible():
+            return
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        self._panel.place_above(QRect(top_left, QSize(self.width(), self.height())))
 
     def show_bubble(self, text: str, ms: int = 6000) -> None:
         self.bubble.setText(text)
         self.bubble.show()
         self._bubble_timer.start(ms)
+        # 气泡把输入框往下推了，面板得跟着重算位置
+        self._sync_panel()
 
     def set_state(self, state: str) -> None:
         self.animator.set_state(state)
@@ -205,6 +272,19 @@ class PetWindow(QWidget):
             self.move(self.pos() + delta)
             self._drag_pos = event.globalPosition().toPoint()
 
+    def moveEvent(self, event) -> None:      # noqa: N802 Qt 命名
+        """拖动宠物时面板要跟着走，否则会孤零零留在原地。"""
+        super().moveEvent(event)
+        self._sync_panel()
+
+    def eventFilter(self, obj, event):       # noqa: N802 Qt 命名
+        """输入框里按 Esc 收起（连面板一起），与占位提示保持一致。"""
+        if obj is self.input and event.type() == QEvent.Type.KeyPress \
+                and event.key() == Qt.Key.Key_Escape:
+            self.hide_input()
+            return True
+        return super().eventFilter(obj, event)
+
     def mouseReleaseEvent(self, event) -> None:
         self._drag_pos = None
         if event.button() != Qt.MouseButton.LeftButton:
@@ -215,6 +295,8 @@ class PetWindow(QWidget):
             if hasattr(event, "timestamp") else True
         if moved < 6 and quick:
             self.play_click()
+            # 单击 = 输入框 + 上方用量面板（2026-11-01 用户要求：
+            # 面板是"加在上边"，不是替代输入框）。
             self.toggle_input()
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -223,6 +305,11 @@ class PetWindow(QWidget):
     def contextMenuEvent(self, event) -> None:
         """右键宠物 = 菜单入口（托盘图标可能被 Windows 收进溢出区）。"""
         self._make_menu().exec(event.globalPos())
+
+    def closeEvent(self, event) -> None:     # noqa: N802 Qt 命名
+        """面板是无父顶层窗口，窗口关了要一起收掉，否则会留在桌面上。"""
+        self._hide_panel()
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 Qt 命名
         """整块清成透明再交给子控件：避免未绘制区域被合成为黑块。"""

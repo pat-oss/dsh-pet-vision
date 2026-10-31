@@ -25,6 +25,8 @@ chat:                            # 用户搭话的会话
   idle_finish_sec: 8              # 最后一次输入/回复后空闲多久自动收尾会话。
                                   # 不收尾的话 mode=chat 一直挂起唤醒监听——
                                   # 聊过一次就再也喊不醒她（实测踩过）
+  auto_consolidate: true          # 会话结束后自己提炼要点并入笔记（会多一次 API 调用）。
+                                  # false = 只保留「记住X」这类显式指令的规则提取
 
 observe:
   interval_idle_sec: 10           # 静止时轮询间隔
@@ -46,8 +48,9 @@ gate:
   proactive_min_interval_sec: 30  # 主动发声最小间隔
   max_proactive_per_hour: 10      # 每小时上限（启动时由 proactive 段自动覆盖，
                                   # 改频率只改上面那段，别改这里）
-  daily_call_budget: 300          # 日 API 调用预算（观察+会话总计）
-  session_reserve_calls: 60       # 其中预留被动会话保底额度（20%）：余量≤此值观察循环提前挂起
+  budget_enabled: false         # false = 不限制每日调用次数（花销看用量面板，不再事前拦）
+  daily_call_budget: 300        # 日 API 调用预算（budget_enabled=true 时才生效）
+  session_reserve_calls: 60     # 预留被动会话保底额度：余量≤此值观察循环提前挂起
   daily_cost_budget_cny: 5        # 日费用预算（按官方价目表核算，实现时核实写入）
   dnd_fullscreen: false            # 全屏应用（看视频/玩游戏/演示）时是否"完全安静"。
                                    # false（默认）= 仍然按主动互动频率陪聊；

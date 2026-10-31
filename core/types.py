@@ -43,8 +43,13 @@ class JudgeConfig:
 class GateConfig:
     proactive_min_interval_sec: float = 30.0
     max_proactive_per_hour: int = 10
+    # 预算开关（2026-10-31 用户拍板：解除预算限制）
+    # False = 不设每日调用上限，观察与会话都不会因为"额度见底"而挂起；
+    # 花销改由用量面板（core/usage.py）事后可见来控制，而不是事前拦。
+    # 想恢复保护就设 True，daily_call_budget / session_reserve_calls 仍然有效。
+    budget_enabled: bool = False
     daily_call_budget: int = 300
-    session_reserve_calls: int = 60      # 预留被动会话保底额度
+    session_reserve_calls: int = 60      # 预留被动会话保底额度（budget_enabled=True 时才生效）
     daily_cost_budget_cny: float = 5.0
     # 全屏时是否"完全安静"（连到点搭话也不说）。默认 False：看视频/玩游戏时
     # 仍然按频率陪聊；但全屏下"画面变动触发"永远关闭（视频画面一直在动，
@@ -108,6 +113,10 @@ class VoiceConfig:
 @dataclass
 class ChatConfig:
     idle_finish_sec: int = 8          # 会话空闲多久自动收尾（恢复唤醒监听）
+    # 会话收尾后自动整理记忆：让模型从本次对话里提炼要点并与旧笔记合并。
+    # 2026-11-01 用户要求"宠物自己记住上下文、整合笔记"，所以默认开。
+    # 每次会话最多一次额外调用；不想花这个 token 就关掉（规则提取仍然有效）。
+    auto_consolidate: bool = True
 
 
 @dataclass
